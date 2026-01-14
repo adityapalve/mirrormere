@@ -1,37 +1,55 @@
 import { NextRequest, NextResponse } from 'next/server';
-import fs from 'fs';
-import path from 'path';
+import { ensureSchema, getDbClient } from '@/lib/db';
+import { buildPublicUrl, getObjectBuffer, getStorageConfig } from '@/lib/storage';
+
+export const runtime = 'nodejs';
 
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ filename: string }> }
 ) {
   try {
-    const { filename } = await params;
-    // Serve JPEG files from the web directory
-    const photoPath = path.join(process.cwd(), '..', 'icloud_photos', 'web', filename);
+    const { filename: photoId } = await params;
+    const url = new URL(request.url);
+    const type = url.searchParams.get('type') ?? 'original';
 
-    if (!fs.existsSync(photoPath)) {
-      console.error('Photo not found:', photoPath);
-      return NextResponse.json(
-        { error: 'Photo not found' },
-        { status: 404 }
-      );
+    const db = getDbClient();
+    await ensureSchema(db);
+
+    const rowResult = await db.execute({
+      sql: 'SELECT object_key, thumbnail_key FROM photos WHERE id = ?',
+      args: [photoId],
+    });
+
+    if (rowResult.rows.length === 0) {
+      return NextResponse.json({ error: 'Photo not found' }, { status: 404 });
     }
 
-    const fileBuffer = fs.readFileSync(photoPath);
+    const row = rowResult.rows[0];
+    const objectKey = String(row.object_key);
+    const thumbnailKey = row.thumbnail_key ? String(row.thumbnail_key) : null;
+    const selectedKey = type === 'thumbnail' && thumbnailKey ? thumbnailKey : objectKey;
 
-    // All files in web directory are JPEG
-    return new NextResponse(fileBuffer, {
+    const storageConfig = getStorageConfig();
+    if (storageConfig.publicBaseUrl) {
+      const publicUrl = buildPublicUrl(storageConfig, selectedKey);
+      if (publicUrl) {
+        return NextResponse.redirect(publicUrl);
+      }
+    }
+
+    const { buffer, contentType } = await getObjectBuffer(storageConfig, selectedKey);
+
+    return new NextResponse(buffer, {
       headers: {
-        'Content-Type': 'image/jpeg',
+        'Content-Type': contentType || 'application/octet-stream',
         'Cache-Control': 'public, max-age=31536000',
       },
     });
   } catch (error) {
     console.error('Error serving photo:', error);
     return NextResponse.json(
-      { error: 'Failed to load photo' },
+      { error: error instanceof Error ? error.message : 'Failed to load photo' },
       { status: 500 }
     );
   }
