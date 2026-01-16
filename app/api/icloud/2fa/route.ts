@@ -19,19 +19,40 @@ export async function POST(request: NextRequest) {
     }
 
     const token = await createWorkerToken('default');
-    const response = await fetch(`${getWorkerBaseUrl()}/sync/2fa`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        session_id: sessionId,
-        code,
-      }),
-    });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
 
-    const payload = await response.json();
+    let response: Response;
+    try {
+      response = await fetch(`${getWorkerBaseUrl()}/sync/2fa`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          code,
+        }),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        return NextResponse.json(
+          { error: '2FA request timed out. Please try again.' },
+          { status: 504 }
+        );
+      }
+
+      return NextResponse.json(
+        { error: 'Failed to reach iCloud worker.' },
+        { status: 502 }
+      );
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    const payload = await response.json().catch(() => null);
 
     if (!response.ok) {
       return NextResponse.json(
