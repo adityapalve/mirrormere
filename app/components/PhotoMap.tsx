@@ -30,12 +30,15 @@ type SyncResult = {
   errors?: string[];
 };
 
+const TWO_FACTOR_TIMEOUT_MS = 20000;
+
 const DEFAULT_VIEW_STATE: ViewState = {
   longitude: 0,
   latitude: 20,
   zoom: 1.5,
   pitch: 0,
   bearing: 0,
+  padding: { top: 0, bottom: 0, left: 0, right: 0 },
 };
 
 export default function PhotoMap() {
@@ -198,14 +201,18 @@ export default function PhotoMap() {
     setVerifyingTwoFactor(true);
     setSyncMessage(null);
 
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), TWO_FACTOR_TIMEOUT_MS);
+
     try {
       const response = await fetch('/api/icloud/2fa', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionId: pendingSessionId, code: twoFactorCode }),
+        signal: controller.signal,
       });
 
-      const payload = await response.json();
+      const payload = await response.json().catch(() => null);
 
       if (!response.ok) {
         throw new Error(payload?.error || '2FA verification failed');
@@ -218,8 +225,13 @@ export default function PhotoMap() {
       setTwoFactorCode('');
       await loadPhotos();
     } catch (error) {
-      setSyncMessage(error instanceof Error ? error.message : '2FA verification failed');
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        setSyncMessage('2FA verification timed out. Please try again.');
+      } else {
+        setSyncMessage(error instanceof Error ? error.message : '2FA verification failed');
+      }
     } finally {
+      window.clearTimeout(timeoutId);
       setVerifyingTwoFactor(false);
     }
   };
@@ -256,7 +268,6 @@ export default function PhotoMap() {
         id: 'photo-thumbnails',
         data: photos,
         pickable: true,
-        autoPacking: true,
         sizeUnits: 'pixels',
         getPosition: (d) => [d.gps?.longitude || 0, d.gps?.latitude || 0],
         getIcon: (d) => ({
@@ -327,7 +338,11 @@ export default function PhotoMap() {
 
         <DeckGL
           viewState={viewState}
-          onViewStateChange={({ viewState: nextViewState }) => setViewState(nextViewState)}
+          onViewStateChange={({ viewState: nextViewState }) => {
+            if ('longitude' in nextViewState && 'latitude' in nextViewState) {
+              setViewState(nextViewState as ViewState);
+            }
+          }}
           controller={true}
           layers={layers}
         >

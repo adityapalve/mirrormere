@@ -1,4 +1,10 @@
-import { GetObjectCommand, ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3';
+import {
+  GetObjectCommand,
+  ListObjectsV2Command,
+  S3Client,
+  type GetObjectCommandOutput,
+  type ListObjectsV2CommandOutput,
+} from '@aws-sdk/client-s3';
 import { Readable } from 'stream';
 
 export type StorageConfig = {
@@ -70,7 +76,7 @@ export async function listPhotoObjects(config: StorageConfig) {
   let continuationToken: string | undefined = undefined;
 
   do {
-    const response = await client.send(
+    const response: ListObjectsV2CommandOutput = await client.send(
       new ListObjectsV2Command({
         Bucket: config.bucket,
         Prefix: config.photoPrefix,
@@ -92,7 +98,7 @@ export async function listPhotoObjects(config: StorageConfig) {
 
 export async function getObjectBuffer(config: StorageConfig, key: string) {
   const client = getS3Client(config);
-  const response = await client.send(
+  const response: GetObjectCommandOutput = await client.send(
     new GetObjectCommand({
       Bucket: config.bucket,
       Key: key,

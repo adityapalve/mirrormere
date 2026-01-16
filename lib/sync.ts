@@ -57,7 +57,8 @@ export async function syncPhotos(limit?: number): Promise<SyncResult> {
   const filteredKeys = allKeys.filter((key) => isSupportedPhotoKey(key));
 
   const result: SyncResult = { imported: 0, skipped: 0, errors: [] };
-  const maxToProcess = limit ?? Number(process.env.SYNC_LIMIT || 0) || filteredKeys.length;
+  const envLimit = Number(process.env.SYNC_LIMIT || 0);
+  const maxToProcess = limit ?? (envLimit || filteredKeys.length);
   let processed = 0;
 
   for (const key of filteredKeys) {
@@ -74,12 +75,12 @@ export async function syncPhotos(limit?: number): Promise<SyncResult> {
 
     try {
       const { buffer } = await getObjectBuffer(config, key);
-      const exif = await exifr.parse(buffer, { tiff: true, ifd0: true, exif: true });
+      const exif = await exifr.parse(buffer, { tiff: true, exif: true });
       const gps = await exifr.gps(buffer).catch(() => null);
 
       const latitude = gps?.latitude ?? null;
       const longitude = gps?.longitude ?? null;
-      const altitude = gps?.altitude ?? null;
+      const altitude = (gps as { altitude?: number } | null)?.altitude ?? null;
       const hasGps = latitude !== null && longitude !== null;
 
       const filename = path.basename(key);
