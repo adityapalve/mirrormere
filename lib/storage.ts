@@ -1,6 +1,7 @@
 import {
   GetObjectCommand,
   ListObjectsV2Command,
+  PutObjectCommand,
   S3Client,
   type GetObjectCommandOutput,
   type ListObjectsV2CommandOutput,
@@ -117,6 +118,31 @@ export async function getObjectBuffer(config: StorageConfig, key: string) {
   }
 
   return { buffer: Buffer.concat(chunks), contentType: response.ContentType };
+}
+
+export async function putObjectBuffer(
+  config: StorageConfig,
+  key: string,
+  buffer: Buffer,
+  contentType?: string,
+) {
+  const client = getS3Client(config);
+  await client.send(
+    new PutObjectCommand({
+      Bucket: config.bucket,
+      Key: key,
+      Body: buffer,
+      ContentType: contentType,
+    })
+  );
+}
+
+export function guessContentType(filename: string) {
+  const lower = filename.toLowerCase();
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.heic')) return 'image/heic';
+  return 'application/octet-stream';
 }
 
 export function buildPublicUrl(config: StorageConfig, key: string) {
