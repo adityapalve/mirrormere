@@ -13,10 +13,10 @@ const geistMono = Geist_Mono({
 });
 
 function getMetadataBase() {
-  const vercelUrl = process.env.VERCEL_URL;
-  if (vercelUrl) return new URL(`https://${vercelUrl}`);
   const siteUrl = process.env.SITE_URL;
   if (siteUrl) return new URL(siteUrl);
+  const vercelUrl = process.env.VERCEL_URL;
+  if (vercelUrl) return new URL(`https://${vercelUrl}`);
   return new URL('http://localhost:3000');
 }
 
