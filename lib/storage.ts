@@ -6,6 +6,7 @@ import {
   type GetObjectCommandOutput,
   type ListObjectsV2CommandOutput,
 } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { Readable } from 'stream';
 
 export type StorageConfig = {
@@ -135,6 +136,20 @@ export async function putObjectBuffer(
       ContentType: contentType,
     })
   );
+}
+
+export async function getPresignedPutUrl(
+  config: StorageConfig,
+  key: string,
+  opts?: { contentType?: string; expiresInSeconds?: number },
+) {
+  const client = getS3Client(config);
+  const command = new PutObjectCommand({
+    Bucket: config.bucket,
+    Key: key,
+    ContentType: opts?.contentType,
+  });
+  return getSignedUrl(client, command, { expiresIn: opts?.expiresInSeconds ?? 600 });
 }
 
 export function guessContentType(filename: string) {
