@@ -246,22 +246,175 @@ export default function MapClient({ slug, token }: { slug: string; token: string
       setUploadMessage(null);
 
       try {
-        const fd = new FormData();
-        Array.from(files).forEach((f) => fd.append('files', f));
+        const fileList = Array.from(files);
+        const exifr = await import('exifr');
 
-        const res = await fetch(`/api/maps/${encodeURIComponent(slug)}/upload?token=${encodeURIComponent(token)}`,
-          { method: 'POST', body: fd },
+        setUploadMessage(`Preparing ${fileList.length} file(s)...`);
+
+        const presignRes = await fetch(
+          `/api/maps/${encodeURIComponent(slug)}/presign?token=${encodeURIComponent(token)}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              files: fileList.map((f, idx) => ({
+                clientId: String(idx),
+                filename: f.name,
+                contentType: f.type || undefined,
+                size: f.size,
+              })),
+            }),
+          },
         );
-        const payload = (await res.json().catch(() => null)) as
-          | { imported: number; skipped: number; errors: string[] }
+
+        const presignPayload = (await presignRes.json().catch(() => null)) as
+          | {
+              uploads: Array<{
+                clientId: string;
+                photoId: string;
+                objectKey: string;
+                filename: string;
+                contentType: string;
+                uploadUrl: string;
+              }>;
+            }
           | { error?: string }
           | null;
-        if (!res.ok) throw new Error((payload as { error?: string } | null)?.error || 'Upload failed');
 
-        const imported = (payload as { imported?: number } | null)?.imported ?? 0;
-        const skipped = (payload as { skipped?: number } | null)?.skipped ?? 0;
-        const errs = (payload as { errors?: string[] } | null)?.errors ?? [];
-        setUploadMessage(`Uploaded ${imported}${skipped ? ` · Skipped ${skipped}` : ''}${errs.length ? ` · ${errs.length} errors` : ''}`);
+        if (!presignRes.ok) {
+          throw new Error((presignPayload as { error?: string } | null)?.error || 'Failed to prepare uploads');
+        }
+
+        const uploads = (presignPayload as { uploads?: unknown } | null)?.uploads;
+        if (!Array.isArray(uploads) || uploads.length === 0) {
+          throw new Error('No uploads were prepared');
+        }
+
+        const ingested: Array<{
+          photoId: string;
+          objectKey: string;
+          filename: string;
+          gps: { latitude: number; longitude: number; altitude?: number | null } | null;
+          dateTaken: string | null;
+          cameraMake: string | null;
+          cameraModel: string | null;
+          width: number | null;
+          height: number | null;
+        }> = [];
+
+        const errors: string[] = [];
+
+        let done = 0;
+        for (const u of uploads) {
+          const idx = Number(u.clientId);
+          const file = Number.isFinite(idx) ? fileList[idx] : undefined;
+          if (!file) {
+            errors.push(`Missing file for upload ${u.filename}`);
+            continue;
+          }
+
+          done += 1;
+          setUploadMessage(`Uploading ${done}/${uploads.length}...`);
+
+          let gps: { latitude: number; longitude: number; altitude?: number | null } | null = null;
+          let dateTaken: string | null = null;
+          let cameraMake: string | null = null;
+          let cameraModel: string | null = null;
+          let width: number | null = null;
+          let height: number | null = null;
+
+          try {
+            const parsed = await exifr.parse(file, { tiff: true, exif: true }).catch(() => null);
+            const gpsParsed = await (exifr as unknown as { gps: (input: unknown) => Promise<unknown> }).gps(file).catch(
+              () => null,
+            );
+
+            if (gpsParsed && typeof gpsParsed === 'object') {
+              const lat = (gpsParsed as { latitude?: unknown }).latitude;
+              const lon = (gpsParsed as { longitude?: unknown }).longitude;
+              const alt = (gpsParsed as { altitude?: unknown }).altitude;
+              if (typeof lat === 'number' && typeof lon === 'number') {
+                gps = { latitude: lat, longitude: lon, altitude: typeof alt === 'number' ? alt : null };
+              }
+            }
+
+            if (parsed && typeof parsed === 'object') {
+              const dto = (parsed as { DateTimeOriginal?: unknown }).DateTimeOriginal;
+              const dt = (parsed as { DateTime?: unknown }).DateTime;
+              const dateRaw = dto ?? dt;
+              if (dateRaw instanceof Date) {
+                dateTaken = dateRaw.toISOString();
+              } else if (typeof dateRaw === 'string') {
+                dateTaken = dateRaw;
+              }
+
+              const mk = (parsed as { Make?: unknown }).Make;
+              const mdl = (parsed as { Model?: unknown }).Model;
+              cameraMake = typeof mk === 'string' ? mk : mk ? String(mk) : null;
+              cameraModel = typeof mdl === 'string' ? mdl : mdl ? String(mdl) : null;
+
+              const w = (parsed as { ExifImageWidth?: unknown; ImageWidth?: unknown }).ExifImageWidth
+                ?? (parsed as { ImageWidth?: unknown }).ImageWidth;
+              const h = (parsed as { ExifImageHeight?: unknown; ImageHeight?: unknown }).ExifImageHeight
+                ?? (parsed as { ImageHeight?: unknown }).ImageHeight;
+
+              const wn = typeof w === 'number' ? w : Number(w);
+              const hn = typeof h === 'number' ? h : Number(h);
+              width = Number.isFinite(wn) ? wn : null;
+              height = Number.isFinite(hn) ? hn : null;
+            }
+          } catch {
+            // EXIF parse is best-effort
+          }
+
+          try {
+            const putRes = await fetch(u.uploadUrl, {
+              method: 'PUT',
+              headers: {
+                'Content-Type': u.contentType,
+              },
+              body: file,
+            });
+
+            if (!putRes.ok) {
+              throw new Error(`Upload failed (${putRes.status})`);
+            }
+
+            ingested.push({
+              photoId: u.photoId,
+              objectKey: u.objectKey,
+              filename: u.filename,
+              gps,
+              dateTaken,
+              cameraMake,
+              cameraModel,
+              width,
+              height,
+            });
+          } catch (e) {
+            errors.push(`${u.filename}: ${e instanceof Error ? e.message : 'Upload failed'}`);
+          }
+        }
+
+        if (ingested.length > 0) {
+          setUploadMessage('Indexing uploads...');
+          const ingestRes = await fetch(
+            `/api/maps/${encodeURIComponent(slug)}/ingest?token=${encodeURIComponent(token)}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ uploads: ingested }),
+            },
+          );
+          const ingestPayload = (await ingestRes.json().catch(() => null)) as { imported?: number; error?: string } | null;
+          if (!ingestRes.ok) {
+            throw new Error(ingestPayload?.error || 'Failed to index uploads');
+          }
+        }
+
+        setUploadMessage(
+          `Uploaded ${ingested.length}/${uploads.length}${errors.length ? ` - ${errors.length} failed` : ''}`,
+        );
         await load();
       } catch (e) {
         setUploadMessage(e instanceof Error ? e.message : 'Upload failed');
