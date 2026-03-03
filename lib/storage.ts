@@ -1,4 +1,5 @@
 import {
+  DeleteObjectCommand,
   GetObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
@@ -119,6 +120,16 @@ export async function getObjectBuffer(config: StorageConfig, key: string) {
   }
 
   return { buffer: Buffer.concat(chunks), contentType: response.ContentType };
+}
+
+export async function deleteObject(config: StorageConfig, key: string) {
+  const client = getS3Client(config);
+  await client.send(
+    new DeleteObjectCommand({
+      Bucket: config.bucket,
+      Key: key,
+    })
+  );
 }
 
 export async function putObjectBuffer(

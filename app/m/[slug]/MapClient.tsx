@@ -1,9 +1,10 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { DeckGL } from '@deck.gl/react';
 import { ScatterplotLayer } from '@deck.gl/layers';
-import Map, { NavigationControl, type ViewState } from 'react-map-gl';
+import type { LayersList } from '@deck.gl/core';
+import Map, { Marker, NavigationControl, type MapRef, type ViewState } from 'react-map-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
 
 type InviteInfo = {
@@ -72,16 +73,53 @@ function hexToRgb(hex: string) {
   };
 }
 
+async function createThumbnailJpeg(file: File, opts?: { maxSize?: number; quality?: number }) {
+  const maxSize = opts?.maxSize ?? 512;
+  const quality = opts?.quality ?? 0.78;
+
+  try {
+    // createImageBitmap is fast and avoids layout.
+    const bitmap = await createImageBitmap(file);
+    const width = bitmap.width;
+    const height = bitmap.height;
+    const scale = Math.min(1, maxSize / Math.max(width, height));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close?.();
+
+    const blob: Blob | null = await new Promise((resolve) =>
+      canvas.toBlob((b) => resolve(b), 'image/jpeg', quality),
+    );
+    return blob;
+  } catch {
+    return null;
+  }
+}
+
+function isLikelyCorsError(error: unknown) {
+  return error instanceof TypeError && /failed to fetch/i.test(error.message);
+}
+
 function Lightbox({
   photo,
   onClose,
   onNext,
   onPrev,
+  onDelete,
+  canDelete,
 }: {
   photo: MapPhoto;
   onClose: () => void;
   onNext: () => void;
   onPrev: () => void;
+  onDelete: () => void;
+  canDelete: boolean;
 }) {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -99,12 +137,12 @@ function Lightbox({
   }, [onClose, onNext, onPrev]);
 
   return (
-      <div
-        className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
-        onMouseDown={(e) => {
-          if (e.target === e.currentTarget) onClose();
-        }}
-      >
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
       <div className="relative w-full max-w-5xl overflow-hidden rounded-3xl border border-white/10 bg-black/70 shadow-2xl">
         <img
           src={photo.originalUrl}
@@ -122,6 +160,24 @@ function Lightbox({
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
           </svg>
         </button>
+
+        {canDelete && (
+          <button
+            onClick={onDelete}
+            className="absolute right-14 top-4 rounded-full border border-white/10 bg-black/40 p-2 text-white/70 backdrop-blur-sm transition hover:bg-red-500/30 hover:text-white"
+            aria-label="Delete"
+            title="Delete photo"
+          >
+            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3m-4 0h14"
+              />
+            </svg>
+          </button>
+        )}
 
         <button
           onClick={onPrev}
@@ -156,6 +212,50 @@ function Lightbox({
   );
 }
 
+const MapArea = memo(function MapArea({
+  mapboxToken,
+  viewState,
+  onViewStateChange,
+  layers,
+  mapRef,
+  onMoveStart,
+  onMoveEnd,
+  children,
+}: {
+  mapboxToken: string;
+  viewState: ViewState;
+  onViewStateChange: (next: ViewState) => void;
+  layers: LayersList;
+  mapRef: RefObject<MapRef | null>;
+  onMoveStart: () => void;
+  onMoveEnd: () => void;
+  children?: ReactNode;
+}) {
+  return (
+    <div className="absolute inset-0">
+      <DeckGL
+        viewState={viewState}
+        onViewStateChange={(e) => onViewStateChange(e.viewState as ViewState)}
+        controller
+        layers={layers}
+      >
+        <Map
+          ref={mapRef}
+          mapboxAccessToken={mapboxToken}
+          mapStyle="mapbox://styles/mapbox/dark-v11"
+          projection={{ name: 'globe' }}
+          style={{ width: '100%', height: '100%' }}
+          onMoveStart={onMoveStart}
+          onMoveEnd={onMoveEnd}
+        >
+          <NavigationControl position="top-right" />
+          {children}
+        </Map>
+      </DeckGL>
+    </div>
+  );
+});
+
 export default function MapClient({ slug, token }: { slug: string; token: string | null }) {
   const mapboxToken = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
   const [meta, setMeta] = useState<MapMeta | null>(null);
@@ -165,8 +265,11 @@ export default function MapClient({ slug, token }: { slug: string; token: string
   const [error, setError] = useState<string | null>(null);
 
   const [trayOpen, setTrayOpen] = useState(false);
+  const [trayGridReady, setTrayGridReady] = useState(false);
   const [activePhotoId, setActivePhotoId] = useState<string | null>(null);
   const [focusedPhotoId, setFocusedPhotoId] = useState<string | null>(null);
+  const [followPaused, setFollowPaused] = useState(false);
+  const [mapMoving, setMapMoving] = useState(false);
 
   const [uploading, setUploading] = useState(false);
   const [uploadMessage, setUploadMessage] = useState<string | null>(null);
@@ -174,6 +277,8 @@ export default function MapClient({ slug, token }: { slug: string; token: string
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [viewState, setViewState] = useState<ViewState>(DEFAULT_VIEW_STATE);
   const viewInitialized = useRef(false);
+  const mapRef = useRef<MapRef | null>(null);
+  const userInteractingRef = useRef(false);
 
   const origin = useMemo(() => {
     if (typeof window === 'undefined') return '';
@@ -191,6 +296,39 @@ export default function MapClient({ slug, token }: { slug: string; token: string
   );
 
   const activeDateLabel = useMemo(() => formatDatePill(activePhoto?.dateTaken ?? null), [activePhoto]);
+
+  useEffect(() => {
+    if (!trayOpen) {
+      setTrayGridReady(false);
+      return;
+    }
+    const t = setTimeout(() => setTrayGridReady(true), 180);
+    return () => clearTimeout(t);
+  }, [trayOpen]);
+
+  const flyToPhoto = useCallback(
+    (photoId: string | null, reason: 'select' | 'lightbox' | 'recenter') => {
+      if (!photoId) return;
+      const photo = photos.find((p) => p.id === photoId) ?? null;
+      const gps = photo?.gps;
+      if (!gps) return;
+
+      // Never fight the user's drag gesture.
+      if (reason !== 'recenter' && userInteractingRef.current) return;
+
+      // Any explicit jump means we are "following" again.
+      setFollowPaused(false);
+
+      mapRef.current?.flyTo({
+        center: [gps.longitude, gps.latitude],
+        zoom: Math.max(viewState.zoom ?? 2.6, 4.2),
+        speed: 0.9,
+        curve: 1.25,
+        essential: true,
+      });
+    },
+    [photos, viewState.zoom],
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -273,9 +411,11 @@ export default function MapClient({ slug, token }: { slug: string; token: string
                 clientId: string;
                 photoId: string;
                 objectKey: string;
+                thumbnailKey: string;
                 filename: string;
                 contentType: string;
                 uploadUrl: string;
+                thumbnailUploadUrl: string;
               }>;
             }
           | { error?: string }
@@ -293,6 +433,7 @@ export default function MapClient({ slug, token }: { slug: string; token: string
         const ingested: Array<{
           photoId: string;
           objectKey: string;
+          thumbnailKey: string | null;
           filename: string;
           gps: { latitude: number; longitude: number; altitude?: number | null } | null;
           dateTaken: string | null;
@@ -380,9 +521,30 @@ export default function MapClient({ slug, token }: { slug: string; token: string
               throw new Error(`Upload failed (${putRes.status})`);
             }
 
+            // Best-effort thumbnail generation/upload.
+            let thumbnailKey: string | null = null;
+            const thumb = await createThumbnailJpeg(file);
+            if (thumb) {
+              try {
+                const thumbRes = await fetch(u.thumbnailUploadUrl, {
+                  method: 'PUT',
+                  headers: {
+                    'Content-Type': 'image/jpeg',
+                  },
+                  body: thumb,
+                });
+                if (thumbRes.ok) {
+                  thumbnailKey = u.thumbnailKey;
+                }
+              } catch {
+                // ignore
+              }
+            }
+
             ingested.push({
               photoId: u.photoId,
               objectKey: u.objectKey,
+              thumbnailKey,
               filename: u.filename,
               gps,
               dateTaken,
@@ -392,7 +554,11 @@ export default function MapClient({ slug, token }: { slug: string; token: string
               height,
             });
           } catch (e) {
-            errors.push(`${u.filename}: ${e instanceof Error ? e.message : 'Upload failed'}`);
+            if (isLikelyCorsError(e)) {
+              errors.push(`${u.filename}: blocked by CORS (check S3 bucket AllowedOrigins)`);
+            } else {
+              errors.push(`${u.filename}: ${e instanceof Error ? e.message : 'Upload failed'}`);
+            }
           }
         }
 
@@ -447,9 +613,13 @@ export default function MapClient({ slug, token }: { slug: string; token: string
     }
   }, [slug, token, origin]);
 
-  const onSelectPhoto = useCallback((id: string) => {
-    setActivePhotoId(id);
-  }, []);
+  const onSelectPhoto = useCallback(
+    (id: string) => {
+      setActivePhotoId(id);
+      flyToPhoto(id, 'select');
+    },
+    [flyToPhoto],
+  );
 
   const focusNext = useCallback(() => {
     if (photos.length === 0) return;
@@ -459,7 +629,8 @@ export default function MapClient({ slug, token }: { slug: string; token: string
     const next = photos[(safe + 1) % photos.length]!.id;
     setFocusedPhotoId(next);
     setActivePhotoId(next);
-  }, [photos, focusedPhotoId, activePhotoId]);
+    flyToPhoto(next, 'lightbox');
+  }, [photos, focusedPhotoId, activePhotoId, flyToPhoto]);
 
   const focusPrev = useCallback(() => {
     if (photos.length === 0) return;
@@ -469,7 +640,8 @@ export default function MapClient({ slug, token }: { slug: string; token: string
     const prev = photos[(safe - 1 + photos.length) % photos.length]!.id;
     setFocusedPhotoId(prev);
     setActivePhotoId(prev);
-  }, [photos, focusedPhotoId, activePhotoId]);
+    flyToPhoto(prev, 'lightbox');
+  }, [photos, focusedPhotoId, activePhotoId, flyToPhoto]);
 
   const layers = useMemo(() => {
     if (!points.length) return [];
@@ -499,6 +671,7 @@ export default function MapClient({ slug, token }: { slug: string; token: string
             setActivePhotoId(obj.id);
             setFocusedPhotoId(obj.id);
             setTrayOpen(true);
+            flyToPhoto(obj.id, 'select');
           }
         },
         updateTriggers: {
@@ -507,7 +680,18 @@ export default function MapClient({ slug, token }: { slug: string; token: string
         },
       }),
     ];
-  }, [points, activePhotoId]);
+  }, [points, activePhotoId, flyToPhoto]);
+
+  const handleMapMoveStart = useCallback(() => {
+    userInteractingRef.current = true;
+    setFollowPaused(true);
+    setMapMoving(true);
+  }, []);
+
+  const handleMapMoveEnd = useCallback(() => {
+    userInteractingRef.current = false;
+    setMapMoving(false);
+  }, []);
 
   if (!mapboxToken) {
     return (
@@ -519,23 +703,38 @@ export default function MapClient({ slug, token }: { slug: string; token: string
 
   return (
     <div className="relative h-screen overflow-hidden bg-black text-white">
-      <div className="absolute inset-0">
-        <DeckGL
-          viewState={viewState}
-          onViewStateChange={(e) => setViewState(e.viewState as ViewState)}
-          controller
-          layers={layers}
-        >
-          <Map
-            mapboxAccessToken={mapboxToken}
-            mapStyle="mapbox://styles/mapbox/dark-v11"
-            projection={{ name: 'globe' }}
-            style={{ width: '100%', height: '100%' }}
+      <MapArea
+        mapboxToken={mapboxToken}
+        viewState={viewState}
+        onViewStateChange={setViewState}
+        layers={layers}
+        mapRef={mapRef}
+        onMoveStart={handleMapMoveStart}
+        onMoveEnd={handleMapMoveEnd}
+      >
+        {activePhoto?.gps && !mapMoving && (
+          <Marker
+            latitude={activePhoto.gps.latitude}
+            longitude={activePhoto.gps.longitude}
+            anchor="center"
           >
-            <NavigationControl position="top-right" />
-          </Map>
-        </DeckGL>
-      </div>
+            <button
+              onClick={() => setFocusedPhotoId(activePhoto.id)}
+              className="group relative h-16 w-16 overflow-hidden rounded-full border border-white/15 bg-black/40 shadow-2xl shadow-black/60 outline-none transition hover:scale-[1.02] focus:ring-2 focus:ring-amber-400/40"
+              title="Open photo"
+            >
+              <img
+                src={activePhoto.thumbnailUrl}
+                alt={activePhoto.filename}
+                loading="lazy"
+                decoding="async"
+                className="h-full w-full object-cover"
+              />
+              <div className="pointer-events-none absolute inset-0 rounded-full ring-2 ring-amber-400/25" />
+            </button>
+          </Marker>
+        )}
+      </MapArea>
 
       {/* Top bar */}
       <div className="pointer-events-none absolute left-0 right-0 top-0 z-10 px-4 pt-4">
@@ -593,9 +792,12 @@ export default function MapClient({ slug, token }: { slug: string; token: string
 
       {/* Bottom tray */}
       <div
-        className={`absolute bottom-0 left-0 right-0 z-20 border-t border-white/10 bg-black/55 backdrop-blur-xl transition-[height] duration-300 ${
-          trayOpen ? 'h-[58vh]' : 'h-24'
-        }`}
+        className="absolute bottom-0 left-0 right-0 z-20 border-t border-white/10 bg-black/55 backdrop-blur-xl will-change-transform"
+        style={{
+          height: '58vh',
+          transform: trayOpen ? 'translateY(0px)' : 'translateY(calc(58vh - 96px))',
+          transition: 'transform 260ms cubic-bezier(0.2, 0, 0, 1)',
+        }}
       >
         <div className="mx-auto flex h-full max-w-6xl flex-col">
           <div className="flex items-center gap-3 px-4 py-3">
@@ -623,31 +825,60 @@ export default function MapClient({ slug, token }: { slug: string; token: string
                       p.id === activePhotoId ? 'border-amber-400/60' : 'border-white/10 hover:border-white/20'
                     }`}
                   >
-                    <img src={p.thumbnailUrl} alt={p.filename} className="h-16 w-24 object-cover" />
+                    <img
+                      src={p.thumbnailUrl}
+                      alt={p.filename}
+                      loading="lazy"
+                      decoding="async"
+                      className="h-16 w-24 object-cover"
+                    />
                   </button>
                 ))}
               </div>
             ) : (
-              <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-6">
-                {photos.map((p) => (
-                  <button
-                    key={p.id}
-                    onClick={() => {
-                      onSelectPhoto(p.id);
-                      setFocusedPhotoId(p.id);
-                    }}
-                    className={`overflow-hidden rounded-xl border transition ${
-                      p.id === activePhotoId ? 'border-amber-400/60' : 'border-white/10 hover:border-white/20'
-                    }`}
-                  >
-                    <img src={p.thumbnailUrl} alt={p.filename} className="aspect-square w-full object-cover" />
-                  </button>
-                ))}
-              </div>
+              trayGridReady ? (
+                <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 md:grid-cols-6">
+                  {photos.map((p) => (
+                    <button
+                      key={p.id}
+                      onClick={() => {
+                        onSelectPhoto(p.id);
+                        setFocusedPhotoId(p.id);
+                      }}
+                      className={`overflow-hidden rounded-xl border transition ${
+                        p.id === activePhotoId ? 'border-amber-400/60' : 'border-white/10 hover:border-white/20'
+                      }`}
+                    >
+                      <img
+                        src={p.thumbnailUrl}
+                        alt={p.filename}
+                        loading="lazy"
+                        decoding="async"
+                        className="aspect-square w-full object-cover"
+                      />
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="flex h-full items-center justify-center text-sm text-white/50">
+                  Loading grid...
+                </div>
+              )
             )}
           </div>
         </div>
       </div>
+
+      {followPaused && activePhoto?.gps && (
+        <div className="pointer-events-none absolute bottom-[calc(58vh+16px)] left-0 right-0 z-20 flex justify-center">
+          <button
+            onClick={() => flyToPhoto(activePhotoId, 'recenter')}
+            className="pointer-events-auto rounded-full border border-white/10 bg-black/45 px-4 py-2 text-xs text-white/70 backdrop-blur-sm hover:bg-black/60"
+          >
+            Recenter
+          </button>
+        </div>
+      )}
 
       {loading && (
         <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-black/30 text-white/60">
@@ -668,6 +899,26 @@ export default function MapClient({ slug, token }: { slug: string; token: string
           onClose={() => setFocusedPhotoId(null)}
           onNext={focusNext}
           onPrev={focusPrev}
+          canDelete={Boolean(token)}
+          onDelete={async () => {
+            if (!token) return;
+            const ok = window.confirm('Delete this photo?');
+            if (!ok) return;
+
+            try {
+              const res = await fetch(
+                `/api/maps/${encodeURIComponent(slug)}/photos/${encodeURIComponent(focusedPhoto.id)}?token=${encodeURIComponent(token)}`,
+                { method: 'DELETE' },
+              );
+              const payload = (await res.json().catch(() => null)) as { error?: string } | null;
+              if (!res.ok) throw new Error(payload?.error || 'Failed to delete');
+              setUploadMessage('Photo deleted');
+              setFocusedPhotoId(null);
+              await load();
+            } catch (e) {
+              setUploadMessage(e instanceof Error ? e.message : 'Failed to delete');
+            }
+          }}
         />
       )}
 

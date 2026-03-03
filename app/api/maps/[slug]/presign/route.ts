@@ -73,9 +73,11 @@ export async function POST(
       clientId: string;
       photoId: string;
       objectKey: string;
+      thumbnailKey: string;
       filename: string;
       contentType: string;
       uploadUrl: string;
+      thumbnailUploadUrl: string;
     }>;
 
     for (const f of files) {
@@ -89,6 +91,10 @@ export async function POST(
       const photoId = newId();
       const ext = path.extname(filename) || '.jpg';
       const objectKey = `${config.photoPrefix}maps/${mapId}/${photoId}${ext.toLowerCase()}`;
+
+      const thumbnailPrefix = config.thumbnailPrefix ?? `${config.photoPrefix}thumbnails/`;
+      const thumbnailKey = `${thumbnailPrefix}maps/${mapId}/${photoId}.jpg`;
+
       const contentType = (f.contentType || '').trim() || guessContentType(filename);
 
       const uploadUrl = await getPresignedPutUrl(config, objectKey, {
@@ -96,7 +102,21 @@ export async function POST(
         expiresInSeconds: 600,
       });
 
-      uploads.push({ clientId, photoId, objectKey, filename, contentType, uploadUrl });
+      const thumbnailUploadUrl = await getPresignedPutUrl(config, thumbnailKey, {
+        contentType: 'image/jpeg',
+        expiresInSeconds: 600,
+      });
+
+      uploads.push({
+        clientId,
+        photoId,
+        objectKey,
+        thumbnailKey,
+        filename,
+        contentType,
+        uploadUrl,
+        thumbnailUploadUrl,
+      });
     }
 
     if (uploads.length === 0) {

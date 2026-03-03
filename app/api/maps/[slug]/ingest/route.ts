@@ -7,6 +7,7 @@ type IngestBody = {
   uploads?: Array<{
     photoId: string;
     objectKey: string;
+    thumbnailKey?: string | null;
     filename: string;
     gps?: { latitude: number; longitude: number; altitude?: number | null } | null;
     dateTaken?: string | null;
@@ -108,7 +109,7 @@ export async function POST(
             mapId,
             inviteId,
             String(u.objectKey),
-            null,
+            u.thumbnailKey ? String(u.thumbnailKey) : null,
             String(u.filename),
             hasGps ? 1 : 0,
             latitude,
